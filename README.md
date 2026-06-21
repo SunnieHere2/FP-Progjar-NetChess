@@ -107,8 +107,8 @@ FP-Progjar-NetChess/
 
 ## Team
 
-| Name | NRP | Role |
-|------|-----|------|
+| Name | NRP |
+|------|-----|
 | Palpal Yalmialam | 5025241002 | 
 | Kenzie Maheswara | 5025241001 | 
 | Bismantaka Revano Dirgantara | 5025241075 | 
