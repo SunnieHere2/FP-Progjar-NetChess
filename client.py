@@ -46,6 +46,9 @@ network = None
 player_color = None
 my_turn = False
 last_move = None
+opponent_left = False
+game_over = False
+game_over_message = ""
 
 # STATES: "menu" | "username" | "lobby" | "waiting" | "game"
 state = "menu"
@@ -94,6 +97,7 @@ def get_status():
 
 def receive_messages():
     global player_color, my_turn, last_move, state, rooms
+    global opponent_left, game_over, game_over_message
 
     while True:
         try:
@@ -112,6 +116,9 @@ def receive_messages():
 
             elif data["type"] == "start":
                 state = "game"
+                opponent_left = False
+                game_over = False
+                game_over_message = ""
                 if player_color == "white":
                     my_turn = True
 
@@ -121,7 +128,14 @@ def receive_messages():
                     is_capture = board.is_capture(move)
                     board.push(move)
                     last_move = move
-                    if board.is_checkmate() or board.is_stalemate():
+                    if board.is_checkmate():
+                        winner = "Black" if board.turn == chess.WHITE else "White"
+                        game_over = True
+                        game_over_message = f"Checkmate! {winner} wins"
+                        end_sound.play()
+                    elif board.is_stalemate():
+                        game_over = True
+                        game_over_message = "Stalemate! It's a draw"
                         end_sound.play()
                     elif board.is_check():
                         check_sound.play()
@@ -137,7 +151,8 @@ def receive_messages():
                     chat_messages.pop(0)
 
             elif data["type"] == "opponent_left":
-                chat_messages.append("Opponent disconnected.")
+                opponent_left = True
+                my_turn = False
 
             elif data["type"] == "error":
                 chat_messages.append(f"Error: {data['message']}")
@@ -313,27 +328,31 @@ def draw_chat():
     font_title = pygame.font.SysFont(None, 30)
     screen.blit(font_title.render("Chat", True, TEXT_COLOR), (BOARD_SIZE + 16, 16))
 
-    font_status = pygame.font.SysFont(None, 20)
-    status_override = get_status()
+    mouse_pos = pygame.mouse.get_pos()
+    menu_btn = pygame.Rect(BOARD_SIZE + CHAT_WIDTH - 84, 8, 72, 28)
+    draw_button(menu_btn, "Menu", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=22)
 
-    if status_override:
-        status_text = status_override
-        status_color = (220, 80, 80)
-    elif player_color:
-        status_text = f"{username} ({player_color})"
-        status_text += " - your turn" if my_turn else " - waiting"
-        status_color = SUBTEXT_COLOR
-    else:
-        status_text = "Waiting for opponent..."
-        status_color = SUBTEXT_COLOR
-
-    screen.blit(font_status.render(status_text, True, status_color), (BOARD_SIZE + 16, 50))
+    # Turn indicator bar
+    if player_color:
+        if my_turn and not game_over and not opponent_left:
+            bar_color = (46, 160, 67)
+            turn_text = f"⚡ Your turn  ({player_color})"
+            turn_fg = (220, 255, 220)
+        else:
+            bar_color = (50, 53, 65)
+            turn_text = f"Opponent's turn  ({player_color})"
+            turn_fg = SUBTEXT_COLOR
+        bar_rect = pygame.Rect(BOARD_SIZE + 8, 44, CHAT_WIDTH - 16, 28)
+        pygame.draw.rect(screen, bar_color, bar_rect, border_radius=8)
+        font_turn = pygame.font.SysFont(None, 21)
+        turn_surf = font_turn.render(turn_text, True, turn_fg)
+        screen.blit(turn_surf, turn_surf.get_rect(center=bar_rect.center))
 
     pygame.draw.line(screen, PANEL_COLOR,
-                     (BOARD_SIZE + 16, 78), (BOARD_SIZE + CHAT_WIDTH - 16, 78), 1)
+                     (BOARD_SIZE + 16, 82), (BOARD_SIZE + CHAT_WIDTH - 16, 82), 1)
 
     font = pygame.font.SysFont(None, 22)
-    y = 90
+    y = 94
     for msg in chat_messages[-12:]:
         text = font.render(msg, True, TEXT_COLOR)
         bubble = pygame.Rect(BOARD_SIZE + 12, y - 5, text.get_width() + 16, text.get_height() + 10)
@@ -350,6 +369,51 @@ def draw_chat():
     else:
         ts = font.render("Click here to chat...", True, SUBTEXT_COLOR)
     screen.blit(ts, (CHAT_INPUT_RECT.x + 10, CHAT_INPUT_RECT.y + 8))
+
+    return menu_btn
+
+
+def draw_game_overlay(mouse_pos):
+    """Semi-transparent overlay shown when game ends or opponent leaves."""
+    overlay = pygame.Surface((BOARD_SIZE, BOARD_SIZE), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 170))
+    screen.blit(overlay, (0, 0))
+
+    panel = pygame.Rect(0, 0, 420, 220)
+    panel.center = (BOARD_SIZE // 2, BOARD_SIZE // 2)
+    pygame.draw.rect(screen, PANEL_COLOR, panel, border_radius=18)
+    pygame.draw.rect(screen, (60, 63, 80), panel, 2, border_radius=18)
+
+    if opponent_left:
+        title_text = "Opponent Left"
+        sub_text = "Your opponent disconnected."
+        title_color = (220, 160, 60)
+    else:
+        title_text = game_over_message
+        # highlight win/loss/draw
+        if "wins" in game_over_message:
+            my_color_name = player_color.capitalize() if player_color else ""
+            if my_color_name in game_over_message:
+                title_color = (100, 220, 100)   # you won
+            else:
+                title_color = (220, 80, 80)     # you lost
+        else:
+            title_color = (220, 180, 60)        # draw/stalemate
+        sub_text = "The game is over."
+
+    font_title = pygame.font.SysFont(None, 52)
+    font_sub = pygame.font.SysFont(None, 26)
+
+    t = font_title.render(title_text, True, title_color)
+    screen.blit(t, t.get_rect(center=(BOARD_SIZE // 2, panel.top + 72)))
+
+    s = font_sub.render(sub_text, True, SUBTEXT_COLOR)
+    screen.blit(s, s.get_rect(center=(BOARD_SIZE // 2, panel.top + 118)))
+
+    btn = pygame.Rect(0, 0, 200, 46)
+    btn.center = (BOARD_SIZE // 2, panel.top + 170)
+    draw_button(btn, "Return to Menu", mouse_pos, font_size=26)
+    return btn
 
 
 def square_to_rowcol(square):
@@ -415,9 +479,9 @@ for piece, filename in piece_map.items():
 
 
 def handle_click(pos):
-    global selected_square, my_turn, legal_targets, last_move
+    global selected_square, my_turn, legal_targets, last_move, game_over, game_over_message
 
-    if not my_turn:
+    if not my_turn or game_over or opponent_left:
         return
 
     col = pos[0] // SQUARE_SIZE
@@ -452,7 +516,14 @@ def handle_click(pos):
             last_move = move
             network.send({"type": "move", "move": move.uci()})
 
-            if board.is_checkmate() or board.is_stalemate():
+            if board.is_checkmate():
+                winner = "Black" if board.turn == chess.WHITE else "White"
+                game_over = True
+                game_over_message = f"Checkmate! {winner} wins"
+                end_sound.play()
+            elif board.is_stalemate():
+                game_over = True
+                game_over_message = "Stalemate! It's a draw"
                 end_sound.play()
             elif board.is_check():
                 check_sound.play()
@@ -478,6 +549,8 @@ play_btn = None
 username_elements = None
 lobby_elements = None
 waiting_back_btn = None
+game_menu_btn = None
+overlay_btn = None
 
 while running:
     mouse_pos = pygame.mouse.get_pos()
@@ -535,7 +608,36 @@ while running:
                     network.send({"type": "get_rooms"})
 
             elif state == "game":
-                if CHAT_INPUT_RECT.collidepoint(event.pos):
+                # Overlay "Return to Menu" button takes priority
+                if overlay_btn and (game_over or opponent_left) and overlay_btn.collidepoint(event.pos):
+                    state = "menu"
+                    network = None
+                    board.reset()
+                    player_color = None
+                    my_turn = False
+                    last_move = None
+                    selected_square = None
+                    legal_targets.clear()
+                    chat_messages.clear()
+                    chat_input = ""
+                    opponent_left = False
+                    game_over = False
+                    game_over_message = ""
+                elif game_menu_btn and game_menu_btn.collidepoint(event.pos):
+                    state = "menu"
+                    network = None
+                    board.reset()
+                    player_color = None
+                    my_turn = False
+                    last_move = None
+                    selected_square = None
+                    legal_targets.clear()
+                    chat_messages.clear()
+                    chat_input = ""
+                    opponent_left = False
+                    game_over = False
+                    game_over_message = ""
+                elif CHAT_INPUT_RECT.collidepoint(event.pos):
                     chat_active = True
                 else:
                     chat_active = False
@@ -595,7 +697,11 @@ while running:
     elif state == "game":
         draw_board()
         draw_pieces()
-        draw_chat()
+        game_menu_btn = draw_chat()
+        if game_over or opponent_left:
+            overlay_btn = draw_game_overlay(mouse_pos)
+        else:
+            overlay_btn = None
 
     pygame.display.flip()
 
