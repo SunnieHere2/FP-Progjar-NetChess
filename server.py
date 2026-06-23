@@ -4,6 +4,7 @@ import json
 
 HOST = "0.0.0.0"
 PORT = 5555
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -23,19 +24,35 @@ def send_json(client, data):
 def broadcast_room_list(exclude=None):
     with rooms_lock:
         room_list = [
-            {"id": rid, "name": r["name"], "players": len(r["clients"])}
+            {
+                "id": rid,
+                "name": r["name"],
+                "players": len(r["clients"]),
+                "spectators": len(r["spectators"]),
+                "ongoing": r["started"]
+            }
             for rid, r in rooms.items()
-            if len(r["clients"]) < 2
         ]
-    msg = json.dumps({"type": "room_list", "rooms": room_list}).encode()
+
+    msg = json.dumps({
+        "type": "room_list",
+        "rooms": room_list
+    }).encode()
+
     with rooms_lock:
-        all_clients = [c for r in rooms.values() for c in r["clients"]]
+        all_clients = []
+
+        for r in rooms.values():
+            all_clients.extend(r["clients"])
+            all_clients.extend(r["spectators"])
+
     for c in all_clients:
         if c != exclude:
             try:
                 c.send(msg)
             except:
                 pass
+
     if exclude:
         try:
             exclude.send(msg)
@@ -63,9 +80,14 @@ def handle_client(client):
             if data["type"] == "get_rooms":
                 with rooms_lock:
                     room_list = [
-                        {"id": rid, "name": r["name"], "players": len(r["clients"])}
+                        {
+                            "id": rid,
+                            "name": r["name"],
+                            "players": len(r["clients"]),
+                            "spectators": len(r["spectators"]),
+                            "ongoing": r["started"]
+                        }
                         for rid, r in rooms.items()
-                        if len(r["clients"]) < 2
                     ]
                 send_json(client, {"type": "room_list", "rooms": room_list})
 
@@ -75,7 +97,10 @@ def handle_client(client):
                     rooms[rid] = {
                         "name": data["name"],
                         "clients": [client],
-                        "host": client
+                        "spectators": [],
+                        "host": client,
+                        "started": False,
+                        "fen": None
                     }
                 room_id = rid
                 send_json(client, {"type": "color", "color": "white"})
@@ -94,20 +119,75 @@ def handle_client(client):
                         joined = False
 
                 if joined:
+                    rooms[rid]["started"] = True
+                    rooms[rid]["fen"] = START_FEN
                     send_json(client, {"type": "color", "color": "black"})
                     host = rooms[rid]["host"]
                     send_json(host, {"type": "start"})
                     send_json(client, {"type": "start"})
                     broadcast_room_list()
-                else:
-                    send_json(client, {"type": "error", "message": "Room full or not found"})
 
-            elif data["type"] in ("move", "chat"):
+            elif data["type"] == "spectate":
+                    print("SPECTATE REQUEST", data["room_id"])
+                    rid = data["room_id"]
+
+                    with rooms_lock:
+                        room = rooms.get(rid)
+                        print("ROOM =", room)
+                        if room:
+                            print("STARTED =", room["started"])
+
+                        if room and room["started"]:
+                            room["spectators"].append(client)
+
+                            room_id = rid
+
+                            send_json(client, {
+                                "type": "spectator_start",
+                                "fen": room["fen"] or START_FEN
+                            })
+
+                            print("SENT spectator_start")
+
+                        else:
+
+                            send_json(client, {
+                                "type": "error",
+                                "message": "Match not available"
+                            })
+
+            elif data["type"] == "move":
                 if room_id:
+
                     with rooms_lock:
                         room = rooms.get(room_id)
+
                     if room:
+
+                        room["fen"] = data.get("fen")
+
                         for c in room["clients"]:
+                            if c != client:
+                                send_json(c, data)
+
+                        for s in room["spectators"]:
+                            send_json(s, data)
+
+            elif data["type"] == "chat":
+
+                if room_id:
+
+                    with rooms_lock:
+                        room = rooms.get(room_id)
+
+                    if room:
+
+                        recipients = (
+                            room["clients"]
+                            + room["spectators"]
+                        )
+
+                        for c in recipients:
                             if c != client:
                                 send_json(c, data)
 
@@ -118,16 +198,33 @@ def handle_client(client):
     if room_id:
         with rooms_lock:
             room = rooms.get(room_id)
+
             if room:
-                room["clients"] = [c for c in room["clients"] if c != client]
-                if not room["clients"]:
+
+                was_player = client in room["clients"]
+
+                room["clients"] = [
+                    c for c in room["clients"]
+                    if c != client
+                ]
+
+                room["spectators"] = [
+                    s for s in room["spectators"]
+                    if s != client
+                ]
+
+                if not room["clients"] and not room["spectators"]:
                     del rooms[room_id]
-                else:
+
+                elif was_player:
                     for c in room["clients"]:
                         try:
-                            send_json(c, {"type": "opponent_left"})
+                            send_json(c, {
+                                "type": "opponent_left"
+                            })
                         except:
                             pass
+
         broadcast_room_list()
 
     client.close()
