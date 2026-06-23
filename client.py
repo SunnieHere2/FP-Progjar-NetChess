@@ -49,6 +49,7 @@ last_move = None
 opponent_left = False
 game_over = False
 game_over_message = ""
+spectator_mode = False
 
 # STATES: "menu" | "username" | "lobby" | "waiting" | "game"
 state = "menu"
@@ -98,6 +99,7 @@ def get_status():
 def receive_messages():
     global player_color, my_turn, last_move, state, rooms
     global opponent_left, game_over, game_over_message
+    global spectator_mode
 
     while True:
         try:
@@ -153,6 +155,13 @@ def receive_messages():
             elif data["type"] == "opponent_left":
                 opponent_left = True
                 my_turn = False
+
+            elif data["type"] == "spectator_start":
+                board.set_fen(data["fen"])
+                state = "game"
+                spectator_mode = True
+                my_turn = False
+                player_color = None
 
             elif data["type"] == "error":
                 chat_messages.append(f"Error: {data['message']}")
@@ -290,8 +299,23 @@ def draw_lobby(mouse_pos):
             screen.blit(players_txt, (row_rect.right - 120, row_rect.y + 13))
 
             join_btn = pygame.Rect(row_rect.right - 80, row_rect.y + 8, 68, 30)
-            draw_button(join_btn, "Join", mouse_pos, font_size=22)
-            join_buttons.append((join_btn, room["id"]))
+            if room["ongoing"]:
+                draw_button(
+                    join_btn,
+                    "Watch",
+                    mouse_pos
+                )
+            else:
+                draw_button(
+                    join_btn,
+                    "Join",
+                    mouse_pos
+                )
+            join_buttons.append((
+                join_btn,
+                room["id"],
+                room["ongoing"]
+            ))
 
     refresh_btn = pygame.Rect(list_panel.x + 20, list_panel.bottom + 10, 130, 38)
     draw_button(refresh_btn, "Refresh", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=24)
@@ -331,6 +355,39 @@ def draw_chat():
     mouse_pos = pygame.mouse.get_pos()
     menu_btn = pygame.Rect(BOARD_SIZE + CHAT_WIDTH - 84, 8, 72, 28)
     draw_button(menu_btn, "Menu", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=22)
+
+    # Spectator mode indicator
+    if spectator_mode:
+        bar_color = (50, 53, 65)
+        turn_text = "👁 Spectating"
+        turn_fg = TEXT_COLOR
+
+        bar_rect = pygame.Rect(
+            BOARD_SIZE + 8,
+            44,
+            CHAT_WIDTH - 16,
+            28
+        )
+
+        pygame.draw.rect(
+            screen,
+            bar_color,
+            bar_rect,
+            border_radius=8
+        )
+
+        font_turn = pygame.font.SysFont(None, 21)
+
+        turn_surf = font_turn.render(
+            turn_text,
+            True,
+            turn_fg
+        )
+
+        screen.blit(
+            turn_surf,
+            turn_surf.get_rect(center=bar_rect.center)
+        )
 
     # Turn indicator bar
     if player_color:
@@ -480,6 +537,10 @@ for piece, filename in piece_map.items():
 
 def handle_click(pos):
     global selected_square, my_turn, legal_targets, last_move, game_over, game_over_message
+    global spectator_mode
+
+    if spectator_mode:
+        return
 
     if not my_turn or game_over or opponent_left:
         return
@@ -514,7 +575,7 @@ def handle_click(pos):
             is_capture = board.is_capture(move)
             board.push(move)
             last_move = move
-            network.send({"type": "move", "move": move.uci()})
+            network.send({"type": "move", "move": move.uci(), "fen": board.fen()})
 
             if board.is_checkmate():
                 winner = "Black" if board.turn == chess.WHITE else "White"
@@ -590,9 +651,19 @@ while running:
                         rid = str(uuid.uuid4())[:8]
                         network.send({"type": "create_room", "room_id": rid, "name": name})
 
-                    for jbtn, rid in join_buttons:
+                    for jbtn, rid, ongoing in join_buttons:
+
                         if jbtn.collidepoint(event.pos):
-                            network.send({"type": "join_room", "room_id": rid})
+                            if ongoing:
+                                network.send({
+                                    "type": "spectate",
+                                    "room_id": rid
+                                })
+                            else:
+                                network.send({
+                                    "type": "join_room",
+                                    "room_id": rid
+                                })
 
                     if refresh_btn.collidepoint(event.pos):
                         network.send({"type": "get_rooms"})
@@ -614,6 +685,7 @@ while running:
                     network = None
                     board.reset()
                     player_color = None
+                    spectator_mode = False
                     my_turn = False
                     last_move = None
                     selected_square = None
@@ -628,6 +700,7 @@ while running:
                     network = None
                     board.reset()
                     player_color = None
+                    spectator_mode = False
                     my_turn = False
                     last_move = None
                     selected_square = None
