@@ -8,7 +8,7 @@ class Network:
         self.buffer = ""
 
     def send(self, data):
-        self.client.send(json.dumps(data).encode())
+        self.client.send((json.dumps(data) + "\n").encode())
 
     def receive(self):
         while True:
