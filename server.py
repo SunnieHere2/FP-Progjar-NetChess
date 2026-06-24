@@ -72,7 +72,11 @@ def broadcast_room_list(exclude=None):
             {
                 "id": rid,
                 "name": r["name"],
-                "players": len(r["clients"]),
+                "players": (
+                    (1 if r["white_client"] else 0)
+                    +
+                    (1 if r["black_client"] else 0)
+                ),
                 "spectators": len(r["spectators"]),
                 "ongoing": r["started"],
                 "time_control": r["time_control"]
@@ -86,10 +90,17 @@ def broadcast_room_list(exclude=None):
     }).encode()
 
     with rooms_lock:
+
         all_clients = []
 
         for r in rooms.values():
-            all_clients.extend(r["clients"])
+
+            if r["white_client"]:
+                all_clients.append(r["white_client"])
+
+            if r["black_client"]:
+                all_clients.append(r["black_client"])
+
             all_clients.extend(r["spectators"])
 
     for c in all_clients:
@@ -125,206 +136,355 @@ def broadcast_leaderboard():
 def handle_client(client):
     room_id = None
 
+    buffer = ""
+
     while True:
         try:
-            raw = b""
-            while True:
-                chunk = client.recv(4096)
-                if not chunk:
-                    raise ConnectionError
-                raw += chunk
-                try:
-                    data = json.loads(raw.decode())
-                    break
-                except json.JSONDecodeError:
+            chunk = client.recv(4096).decode()
+
+            if not chunk:
+                raise ConnectionError
+
+            buffer += chunk
+
+            while "\n" in buffer:
+
+                line, buffer = buffer.split("\n", 1)
+
+                if not line.strip():
                     continue
 
-            if data["type"] == "get_rooms":
-                with rooms_lock:
-                    room_list = [
-                        {
-                            "id": rid,
-                            "name": r["name"],
-                            "players": len(r["clients"]),
-                            "spectators": len(r["spectators"]),
-                            "ongoing": r["started"],
-                            "time_control": r["time_control"]
+                data = json.loads(line)
+
+                # process packet
+
+                if data["type"] == "get_rooms":
+                    with rooms_lock:
+                        room_list = [
+                            {
+                                "id": rid,
+                                "name": r["name"],
+                                "players": (
+                                    (1 if r["white_client"] else 0)
+                                    +
+                                    (1 if r["black_client"] else 0)
+                                ),
+                                "spectators": len(r["spectators"]),
+                                "ongoing": r["started"],
+                                "time_control": r["time_control"]
+                            }
+                            for rid, r in rooms.items()
+                        ]
+                    send_json(client, {"type": "room_list", "rooms": room_list})
+
+                elif data["type"] == "get_leaderboard":
+                    send_json(client, {"type": "leaderboard", "data": get_leaderboard_list()})
+
+                elif data["type"] == "create_room":
+                    print("CREATE ROOM RECEIVED")
+                    tc = data.get("time_control", 5)
+                    if tc not in (1, 5, 10):
+                        tc = 5
+                    with rooms_lock:
+                        rid = data["room_id"]
+                        rooms[rid] = {
+                            "name": data["name"],
+                            "white_client": client,
+                            "black_client": None,
+                            "white_username": data.get("username", "Player"),
+                            "black_username": None,
+                            "white_connected": True,
+                            "black_connected": False,
+                            "spectators": [],
+                            "host": client,
+                            "started": False,
+                            "fen": None,
+                            "time_control": tc,
+                            "clocks": None,
+                            "turn": "white",
+                            "last_tick": None,
+                            "game_over": False,
+                            "history": []
                         }
-                        for rid, r in rooms.items()
-                    ]
-                send_json(client, {"type": "room_list", "rooms": room_list})
-
-            elif data["type"] == "get_leaderboard":
-                send_json(client, {"type": "leaderboard", "data": get_leaderboard_list()})
-
-            elif data["type"] == "create_room":
-                tc = data.get("time_control", 5)
-                if tc not in (1, 5, 10):
-                    tc = 5
-                with rooms_lock:
-                    rid = data["room_id"]
-                    rooms[rid] = {
-                        "name": data["name"],
-                        "clients": [client],
-                        "spectators": [],
-                        "host": client,
-                        "started": False,
-                        "fen": None,
-                        "usernames": {client: data.get("username", "Player")},
-                        "time_control": tc,
-                        "clocks": None,
-                        "turn": "white",
-                        "last_tick": None,
-                        "game_over": False,
-                        "history": []
-                    }
-                room_id = rid
-                send_json(client, {"type": "color", "color": "white"})
-                send_json(client, {"type": "waiting"})
-                broadcast_room_list()
-
-            elif data["type"] == "join_room":
-                rid = data["room_id"]
-                with rooms_lock:
-                    room = rooms.get(rid)
-                    if room and len(room["clients"]) < 2:
-                        room["clients"].append(client)
-                        room_id = rid
-                        joined = True
-                    else:
-                        joined = False
-
-                if joined:
-                    rooms[rid]["started"] = True
-                    rooms[rid]["fen"] = START_FEN
-                    rooms[rid]["usernames"][client] = data.get("username", "Player")
-
-                    minutes = rooms[rid]["time_control"]
-                    total_seconds = minutes * 60
-                    rooms[rid]["clocks"] = {"white": total_seconds, "black": total_seconds}
-                    rooms[rid]["turn"] = "white"
-                    rooms[rid]["last_tick"] = time.time()
-
-                    send_json(client, {"type": "color", "color": "black"})
-                    host = rooms[rid]["host"]
-                    start_payload = {
-                        "type": "start",
-                        "time_control": minutes,
-                        "clocks": rooms[rid]["clocks"]
-                    }
-                    send_json(host, start_payload)
-                    send_json(client, start_payload)
+                    room_id = rid
+                    send_json(client, {"type": "color", "color": "white"})
+                    send_json(client, {"type": "waiting"})
                     broadcast_room_list()
 
-            elif data["type"] == "spectate":
-                    print("SPECTATE REQUEST", data["room_id"])
+                elif data["type"] == "join_room":
                     rid = data["room_id"]
-
                     with rooms_lock:
                         room = rooms.get(rid)
-                        print("ROOM =", room)
-                        if room:
-                            print("STARTED =", room["started"])
-
-                        if room and room["started"]:
-                            room["spectators"].append(client)
-
-                            room_id = rid
-
-                            send_json(client, {
-                                "type": "spectator_start",
-                                "fen": room["fen"] or START_FEN,
-                                "history": room["history"]
-                            })
-
-                            print("SENT spectator_start")
-
-                        else:
-
-                            send_json(client, {
-                                "type": "error",
-                                "message": "Match not available"
-                            })
-
-            elif data["type"] == "move":
-                if room_id:
-
-                    with rooms_lock:
-                        room = rooms.get(room_id)
-
-                    if room and not room.get("game_over"):
-
-                        room["fen"] = data.get("fen")
-
-                        # Deduct elapsed time from the side that just moved, switch the clock
-                        clocks_payload = None
-                        if room.get("clocks") is not None:
-                            now = time.time()
-                            moving_color = room["turn"]
-                            elapsed = now - room["last_tick"]
-                            room["clocks"][moving_color] = max(0, room["clocks"][moving_color] - elapsed)
-
-                            room["history"].append({
-                                "move": data.get("move"),
-                                "color": moving_color,
-                                "fen_after": data.get("fen"),
-                                "move_number": len(room["history"]) + 1
-                            })
-
-                            room["turn"] = "black" if moving_color == "white" else "white"
-                            room["last_tick"] = now
-                            clocks_payload = dict(room["clocks"])
-                            data["clocks"] = clocks_payload
-                            data["turn"] = room["turn"]
-
-                        for c in room["clients"]:
-                            if c != client:
-                                send_json(c, data)
-
-                        for s in room["spectators"]:
-                            send_json(s, data)
-
-                        # Sync the clock back to the player who just moved too
-                        if clocks_payload is not None:
-                            send_json(client, {
-                                "type": "clock_sync",
-                                "clocks": clocks_payload,
-                                "turn": room["turn"]
-                            })
-
-                        # Server-side checkmate check (authoritative) for the leaderboard
-                        fen = data.get("fen")
-                        if fen and len(room["clients"]) == 2:
-                            try:
-                                board_check = chess.Board(fen)
-                                if board_check.is_checkmate():
-                                    # side to move (board_check.turn) is the one checkmated/loses
-                                    winner_idx = 1 if board_check.turn == chess.WHITE else 0
-                                    winner_client = room["clients"][winner_idx]
-                                    winner_name = room["usernames"].get(winner_client, "Player")
-                                    room["game_over"] = True
-                                    record_win(winner_name)
-                                    broadcast_leaderboard()
-                            except ValueError:
-                                pass
-
-            elif data["type"] == "chat":
-
-                if room_id:
-
-                    with rooms_lock:
-                        room = rooms.get(room_id)
-
-                    if room:
-
-                        recipients = (
-                            room["clients"]
-                            + room["spectators"]
+                        player_count = (
+                            (1 if room["white_client"] else 0)
+                            +
+                            (1 if room["black_client"] else 0)
                         )
 
-                        for c in recipients:
-                            if c != client:
-                                send_json(c, data)
+                        if room and player_count < 2:
+                            room["black_client"] = client
+                            room["black_username"] = data.get(
+                                "username",
+                                "Player"
+                            )
+                            room["black_connected"] = True
+                            room_id = rid
+                            joined = True
+                        else:
+                            joined = False
+
+                    if joined:
+                        rooms[rid]["started"] = True
+                        rooms[rid]["fen"] = START_FEN
+
+                        minutes = rooms[rid]["time_control"]
+                        total_seconds = minutes * 60
+                        rooms[rid]["clocks"] = {"white": total_seconds, "black": total_seconds}
+                        rooms[rid]["turn"] = "white"
+                        rooms[rid]["last_tick"] = time.time()
+
+                        send_json(client, {"type": "color", "color": "black"})
+                        host = rooms[rid]["host"]
+                        start_payload = {
+                            "type": "start",
+                            "time_control": minutes,
+                            "clocks": rooms[rid]["clocks"]
+                        }
+                        send_json(host, start_payload)
+                        send_json(client, start_payload)
+                        broadcast_room_list()
+
+                elif data["type"] == "spectate":
+                        print("SPECTATE REQUEST", data["room_id"])
+                        rid = data["room_id"]
+
+                        with rooms_lock:
+                            room = rooms.get(rid)
+                            print("ROOM =", room)
+                            if room:
+                                print("STARTED =", room["started"])
+
+                            if room and room["started"]:
+                                room["spectators"].append(client)
+
+                                room_id = rid
+
+                                send_json(client, {
+                                    "type": "spectator_start",
+                                    "fen": room["fen"] or START_FEN,
+                                    "history": room["history"]
+                                })
+
+                                print("SENT spectator_start")
+
+                            else:
+
+                                send_json(client, {
+                                    "type": "error",
+                                    "message": "Match not available"
+                                })
+
+                elif data["type"] == "reconnect":
+
+                    username = data["username"]
+
+                    with rooms_lock:
+                        print("RECONNECT:", username)
+                        for rid, room in rooms.items():
+
+                            print(
+                                "ROOM",
+                                rid,
+                                "W=", room["white_username"],
+                                room["white_connected"],
+                                "B=", room["black_username"],
+                                room["black_connected"]
+                            )
+
+                            if (
+                                room["white_username"] == username
+                                and not room["white_connected"]
+                            ):
+                                print("REJOINED AS WHITE")
+                                room["white_client"] = client
+                                room["white_connected"] = True
+
+                                room_id = rid
+                                now = time.time()
+
+                                if room["clocks"] is not None:
+                                    active = room["turn"]
+                                    live_clocks = dict(room["clocks"])
+                                    elapsed = now - room["last_tick"]
+                                    live_clocks[active] = max(
+                                        0,
+                                        live_clocks[active] - elapsed
+                                    )
+
+                                else:
+                                    live_clocks = None
+                                send_json(client, {
+                                    "type": "resume",
+                                    "color": "white",
+                                    "fen": room["fen"],
+                                    "clocks": live_clocks,
+                                    "turn": room["turn"],
+                                    "time_control": room["time_control"]
+                                })
+
+                                if room["black_client"]:
+                                    try:
+                                        send_json(room["black_client"], {
+                                            "type": "opponent_reconnected"
+                                        })
+                                    except:
+                                        pass
+
+                                print("RECONNECT FINISHED")
+                                break
+
+                            elif (
+                                room["black_username"] == username
+                                and not room["black_connected"]
+                            ):
+                                print("REJOINED AS BLACK")
+                                room["black_client"] = client
+                                room["black_connected"] = True
+
+                                room_id = rid
+                                now = time.time()
+                                if room["clocks"] is not None:
+                                    active = room["turn"]
+                                    live_clocks = dict(room["clocks"])
+                                    elapsed = now - room["last_tick"]
+                                    live_clocks[active] = max(
+                                        0,
+                                        live_clocks[active] - elapsed
+                                    )
+                                send_json(client, {
+                                    "type": "resume",
+                                    "color": "black",
+                                    "fen": room["fen"],
+                                    "clocks": live_clocks,
+                                    "turn": room["turn"],
+                                    "time_control": room["time_control"]
+                                })
+
+                                if room["white_client"]:
+                                    try:
+                                        send_json(room["white_client"], {
+                                            "type": "opponent_reconnected"
+                                        })
+                                    except:
+                                        pass
+
+                                print("RECONNECT FINISHED")
+                                break
+
+                elif data["type"] == "move":
+                    if room_id:
+
+                        with rooms_lock:
+                            room = rooms.get(room_id)
+
+                        if room and not room.get("game_over"):
+
+                            room["fen"] = data.get("fen")
+
+                            # Deduct elapsed time from the side that just moved, switch the clock
+                            clocks_payload = None
+                            if room.get("clocks") is not None:
+                                now = time.time()
+                                moving_color = room["turn"]
+                                room["history"].append({
+                                    "move": data.get("move"),
+                                    "color": moving_color,
+                                    "fen_after": data.get("fen"),
+                                    "move_number": len(room["history"]) + 1
+                                })
+                                elapsed = now - room["last_tick"]
+                                room["clocks"][moving_color] = max(0, room["clocks"][moving_color] - elapsed)
+                                room["turn"] = "black" if moving_color == "white" else "white"
+                                room["last_tick"] = now
+                                clocks_payload = dict(room["clocks"])
+                                data["clocks"] = clocks_payload
+                                data["turn"] = room["turn"]
+
+                            players = []
+
+                            if room["white_client"]:
+                                players.append(room["white_client"])
+
+                            if room["black_client"]:
+                                players.append(room["black_client"])
+
+                            for c in players:
+                                if c != client:
+                                    send_json(c, data)
+
+                            for s in room["spectators"]:
+                                send_json(s, data)
+
+                            # Sync the clock back to the player who just moved too
+                            if clocks_payload is not None:
+                                send_json(client, {
+                                    "type": "clock_sync",
+                                    "clocks": clocks_payload,
+                                    "turn": room["turn"]
+                                })
+
+                            # Server-side checkmate check (authoritative) for the leaderboard
+                            fen = data.get("fen")
+                            player_count = (
+                                (1 if room["white_client"] else 0)
+                                +
+                                (1 if room["black_client"] else 0)
+                            )
+
+                            if fen and player_count == 2:
+                                try:
+                                    board_check = chess.Board(fen)
+                                    if board_check.is_checkmate():
+                                        # side to move (board_check.turn) is the one checkmated/loses
+                                        winner_idx = 1 if board_check.turn == chess.WHITE else 0
+                                        winner_client = (
+                                            room["white_client"]
+                                            if winner_idx == 0
+                                            else room["black_client"]
+                                        )
+                                        winner_name = (
+                                            room["white_username"]
+                                            if winner_client == room["white_client"]
+                                            else room["black_username"]
+                                        )
+                                        room["game_over"] = True
+                                        record_win(winner_name)
+                                        broadcast_leaderboard()
+                                except ValueError:
+                                    pass
+
+                elif data["type"] == "chat":
+
+                    if room_id:
+
+                        with rooms_lock:
+                            room = rooms.get(room_id)
+
+                        if room:
+
+                            players = []
+
+                            if room["white_client"]:
+                                players.append(room["white_client"])
+
+                            if room["black_client"]:
+                                players.append(room["black_client"])
+
+                            recipients = players + room["spectators"]
+
+                            for c in recipients:
+                                if c != client:
+                                    send_json(c, data)
 
         except Exception as e:
             print("Client error:", e)
@@ -336,27 +496,48 @@ def handle_client(client):
 
             if room:
 
-                was_player = client in room["clients"]
-
-                room["clients"] = [
-                    c for c in room["clients"]
-                    if c != client
-                ]
+                was_player = (
+                    client == room["white_client"]
+                    or
+                    client == room["black_client"]
+                )
 
                 room["spectators"] = [
                     s for s in room["spectators"]
                     if s != client
                 ]
 
-                if not room["clients"] and not room["spectators"]:
+                if client == room["white_client"]:
+                    room["white_connected"] = False
+                    room["white_client"] = None
+                    print("WHITE DISCONNECTED", room["white_username"])
+
+                if client == room["black_client"]:
+                    room["black_connected"] = False
+                    room["black_client"] = None
+                    print("BLACK DISCONNECTED", room["black_username"])
+
+                no_players = (
+                    room["white_client"] is None
+                    and room["black_client"] is None
+                )
+
+                if no_players and not room["spectators"]:
                     del rooms[room_id]
 
                 elif was_player:
-                    room["game_over"] = True
-                    for c in room["clients"]:
+                    players = []
+
+                    if room["white_client"]:
+                        players.append(room["white_client"])
+
+                    if room["black_client"]:
+                        players.append(room["black_client"])
+
+                    for c in players:
                         try:
                             send_json(c, {
-                                "type": "opponent_left"
+                                "type": "opponent_disconnected"
                             })
                         except:
                             pass
@@ -381,7 +562,13 @@ def clock_monitor():
         for rid, room in room_snapshot:
             if room.get("game_over") or room.get("clocks") is None:
                 continue
-            if len(room["clients"]) != 2:
+            player_count = (
+                (1 if room["white_client"] else 0)
+                +
+                (1 if room["black_client"] else 0)
+            )
+
+            if player_count != 2:
                 continue
 
             turn_color = room["turn"]
@@ -401,8 +588,16 @@ def clock_monitor():
             loser_color = turn_color
             winner_color = "black" if loser_color == "white" else "white"
             winner_idx = 0 if winner_color == "white" else 1
-            winner_client = room["clients"][winner_idx]
-            winner_name = room["usernames"].get(winner_client, "Player")
+            winner_client = (
+                room["white_client"]
+                if winner_idx == 0
+                else room["black_client"]
+            )
+            winner_name = (
+                room["white_username"]
+                if winner_client == room["white_client"]
+                else room["black_username"]
+            )
 
             record_win(winner_name)
             broadcast_leaderboard()
@@ -414,7 +609,15 @@ def clock_monitor():
                 "winner": winner_name
             }
 
-            for c in room["clients"]:
+            players = []
+
+            if room["white_client"]:
+                players.append(room["white_client"])
+
+            if room["black_client"]:
+                players.append(room["black_client"])
+
+            for c in players:
                 try:
                     send_json(c, timeout_msg)
                 except:
