@@ -34,6 +34,7 @@ CHAT_BG = (22, 24, 30)
 CHAT_BUBBLE = (38, 41, 51)
 
 chat_messages = []
+move_history = []
 chat_input = ""
 chat_active = False
 
@@ -157,8 +158,16 @@ def receive_messages():
                 move = chess.Move.from_uci(data["move"])
                 if move in board.legal_moves:
                     is_capture = board.is_capture(move)
+                    move_number = board.fullmove_number
+                    moving_color = "white" if board.turn == chess.WHITE else "black"
+                    san = board.san(move)
                     board.push(move)
                     last_move = move
+                    move_history.append({
+                        "number": move_number,
+                        "color": moving_color,
+                        "san": san
+                    })
                     if board.is_checkmate():
                         winner = "Black" if board.turn == chess.WHITE else "White"
                         game_over = True
@@ -203,6 +212,23 @@ def receive_messages():
                 my_turn = False
 
             elif data["type"] == "spectator_start":
+                move_history.clear()
+                replay_board = chess.Board()
+                for entry in data.get("history", []):
+                    try:
+                        uci_move = chess.Move.from_uci(entry["move"])
+                        if uci_move in replay_board.legal_moves:
+                            pair_number = replay_board.fullmove_number
+                            moving_color = "white" if replay_board.turn == chess.WHITE else "black"
+                            san = replay_board.san(uci_move)
+                            replay_board.push(uci_move)
+                            move_history.append({
+                                "number": pair_number,
+                                "color": moving_color,
+                                "san": san
+                            })
+                    except (ValueError, KeyError):
+                        continue
                 board.set_fen(data["fen"])
                 state = "game"
                 spectator_mode = True
@@ -473,6 +499,55 @@ def draw_waiting(mouse_pos):
     return back_btn
 
 
+def draw_move_history(panel_top):
+    panel_rect = pygame.Rect(BOARD_SIZE + 8, panel_top, CHAT_WIDTH - 16, 130)
+    pygame.draw.rect(screen, CHAT_BUBBLE, panel_rect, border_radius=10)
+
+    font_label = pygame.font.SysFont(None, 21)
+    label = font_label.render("Move history", True, SUBTEXT_COLOR)
+    screen.blit(label, (panel_rect.x + 10, panel_rect.y + 6))
+
+    pygame.draw.line(screen, PANEL_COLOR,
+                     (panel_rect.x + 10, panel_rect.y + 28),
+                     (panel_rect.right - 10, panel_rect.y + 28), 1)
+
+    font_move = pygame.font.SysFont(None, 21)
+    row_h = 20
+    visible_rows = (panel_rect.height - 34) // row_h
+
+    pairs = []
+    for entry in move_history:
+        if entry["color"] == "white":
+            pairs.append([entry["number"], entry["san"], None])
+        else:
+            if pairs and pairs[-1][2] is None and pairs[-1][0] == entry["number"]:
+                pairs[-1][2] = entry["san"]
+            else:
+                pairs.append([entry["number"], None, entry["san"]])
+
+    visible_pairs = pairs[-visible_rows:] if visible_rows > 0 else []
+
+    y = panel_rect.y + 32
+    num_x = panel_rect.x + 10
+    white_x = panel_rect.x + 38
+    black_x = panel_rect.x + 95
+
+    for num, white_san, black_san in visible_pairs:
+        num_surf = font_move.render(f"{num}.", True, SUBTEXT_COLOR)
+        screen.blit(num_surf, (num_x, y))
+        if white_san:
+            w_surf = font_move.render(white_san, True, TEXT_COLOR)
+            screen.blit(w_surf, (white_x, y))
+        if black_san:
+            b_surf = font_move.render(black_san, True, TEXT_COLOR)
+            screen.blit(b_surf, (black_x, y))
+        y += row_h
+
+    if not pairs:
+        empty = font_move.render("No moves yet", True, SUBTEXT_COLOR)
+        screen.blit(empty, (panel_rect.x + 10, panel_rect.y + 34))
+
+
 def draw_chat():
     pygame.draw.rect(screen, CHAT_BG, (BOARD_SIZE, 0, CHAT_WIDTH, HEIGHT))
 
@@ -557,12 +632,17 @@ def draw_chat():
 
     font = pygame.font.SysFont(None, 22)
     y = 164
+    chat_zone_bottom = HEIGHT - 195
     for msg in chat_messages[-12:]:
         text = font.render(msg, True, TEXT_COLOR)
         bubble = pygame.Rect(BOARD_SIZE + 12, y - 5, text.get_width() + 16, text.get_height() + 10)
+        if bubble.bottom > chat_zone_bottom:
+            break
         pygame.draw.rect(screen, CHAT_BUBBLE, bubble, border_radius=10)
         screen.blit(text, (bubble.x + 8, bubble.y + 5))
         y += bubble.height + 8
+
+    draw_move_history(chat_zone_bottom)
 
     border_col = BUTTON_COLOR if chat_active else PANEL_COLOR
     pygame.draw.rect(screen, (45, 48, 58) if chat_active else CHAT_BUBBLE, CHAT_INPUT_RECT, border_radius=10)
@@ -720,8 +800,16 @@ def handle_click(pos):
 
         if move in board.legal_moves:
             is_capture = board.is_capture(move)
+            move_number = board.fullmove_number
+            moving_color = "white" if board.turn == chess.WHITE else "black"
+            san = board.san(move)
             board.push(move)
             last_move = move
+            move_history.append({
+                "number": move_number,
+                "color": moving_color,
+                "san": san
+            })
             network.send({"type": "move", "move": move.uci(), "fen": board.fen()})
 
             if board.is_checkmate():
@@ -859,6 +947,7 @@ while running:
                     selected_square = None
                     legal_targets.clear()
                     chat_messages.clear()
+                    move_history.clear()
                     chat_input = ""
                     opponent_left = False
                     game_over = False
@@ -875,6 +964,7 @@ while running:
                     selected_square = None
                     legal_targets.clear()
                     chat_messages.clear()
+                    move_history.clear()
                     chat_input = ""
                     opponent_left = False
                     game_over = False

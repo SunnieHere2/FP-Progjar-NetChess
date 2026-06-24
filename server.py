@@ -175,7 +175,8 @@ def handle_client(client):
                         "clocks": None,
                         "turn": "white",
                         "last_tick": None,
-                        "game_over": False
+                        "game_over": False,
+                        "history": []
                     }
                 room_id = rid
                 send_json(client, {"type": "color", "color": "white"})
@@ -232,7 +233,8 @@ def handle_client(client):
 
                             send_json(client, {
                                 "type": "spectator_start",
-                                "fen": room["fen"] or START_FEN
+                                "fen": room["fen"] or START_FEN,
+                                "history": room["history"]
                             })
 
                             print("SENT spectator_start")
@@ -261,6 +263,14 @@ def handle_client(client):
                             moving_color = room["turn"]
                             elapsed = now - room["last_tick"]
                             room["clocks"][moving_color] = max(0, room["clocks"][moving_color] - elapsed)
+
+                            room["history"].append({
+                                "move": data.get("move"),
+                                "color": moving_color,
+                                "fen_after": data.get("fen"),
+                                "move_number": len(room["history"]) + 1
+                            })
+
                             room["turn"] = "black" if moving_color == "white" else "white"
                             room["last_tick"] = now
                             clocks_payload = dict(room["clocks"])
