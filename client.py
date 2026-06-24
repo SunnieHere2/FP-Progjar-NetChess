@@ -2,6 +2,7 @@ import pygame
 import chess
 import threading
 import time
+import math
 import numpy as np
 import uuid
 from network import Network
@@ -34,9 +35,9 @@ CHAT_BG = (22, 24, 30)
 CHAT_BUBBLE = (38, 41, 51)
 
 chat_messages = []
-move_history = []
 chat_input = ""
 chat_active = False
+move_history = []
 
 CHAT_INPUT_RECT = pygame.Rect(BOARD_SIZE + 10, HEIGHT - 50, CHAT_WIDTH - 20, 35)
 
@@ -49,6 +50,8 @@ player_color = None
 my_turn = False
 last_move = None
 opponent_left = False
+opponent_disconnected = False
+opponent_disconnected_since = None
 game_over = False
 game_over_message = ""
 spectator_mode = False
@@ -123,6 +126,7 @@ def format_clock(seconds):
 def receive_messages():
     global player_color, my_turn, last_move, state, rooms
     global opponent_left, game_over, game_over_message
+    global opponent_disconnected, opponent_disconnected_since
     global spectator_mode, leaderboard_data
     global time_control, clocks, clock_turn, clock_last_sync
 
@@ -144,6 +148,8 @@ def receive_messages():
             elif data["type"] == "start":
                 state = "game"
                 opponent_left = False
+                opponent_disconnected = False
+                opponent_disconnected_since = None
                 game_over = False
                 game_over_message = ""
                 if player_color == "white":
@@ -155,19 +161,24 @@ def receive_messages():
                 clock_last_sync = time.time()
 
             elif data["type"] == "move":
+                opponent_disconnected = False
+                opponent_disconnected_since = None
                 move = chess.Move.from_uci(data["move"])
                 if move in board.legal_moves:
                     is_capture = board.is_capture(move)
                     move_number = board.fullmove_number
                     moving_color = "white" if board.turn == chess.WHITE else "black"
+
                     san = board.san(move)
+
                     board.push(move)
-                    last_move = move
+
                     move_history.append({
                         "number": move_number,
                         "color": moving_color,
                         "san": san
                     })
+                    last_move = move
                     if board.is_checkmate():
                         winner = "Black" if board.turn == chess.WHITE else "White"
                         game_over = True
@@ -211,30 +222,81 @@ def receive_messages():
                 opponent_left = True
                 my_turn = False
 
+            elif data["type"] == "opponent_disconnected":
+                opponent_disconnected = True
+                opponent_disconnected_since = time.time()
+
+            elif data["type"] == "opponent_reconnected":
+                opponent_disconnected = False
+                opponent_disconnected_since = None
+                chat_messages.append("Opponent reconnected.")
+                if len(chat_messages) > 15:
+                    chat_messages.pop(0)
+
             elif data["type"] == "spectator_start":
+
                 move_history.clear()
+
                 replay_board = chess.Board()
+
                 for entry in data.get("history", []):
+
                     try:
+
                         uci_move = chess.Move.from_uci(entry["move"])
+
                         if uci_move in replay_board.legal_moves:
+
                             pair_number = replay_board.fullmove_number
-                            moving_color = "white" if replay_board.turn == chess.WHITE else "black"
+
+                            moving_color = (
+                                "white"
+                                if replay_board.turn == chess.WHITE
+                                else "black"
+                            )
+
                             san = replay_board.san(uci_move)
+
                             replay_board.push(uci_move)
+
                             move_history.append({
                                 "number": pair_number,
                                 "color": moving_color,
                                 "san": san
                             })
+
                     except (ValueError, KeyError):
                         continue
+
                 board.set_fen(data["fen"])
+
                 state = "game"
                 spectator_mode = True
                 my_turn = False
                 player_color = None
 
+            elif data["type"] == "resume":
+                board.set_fen(data["fen"])
+
+                player_color = data["color"]
+
+                clocks = data["clocks"]
+                clock_turn = data["turn"]
+                clock_last_sync = time.time()
+
+                time_control = data.get("time_control")
+
+                state = "game"
+                spectator_mode = False
+                opponent_left = False
+                opponent_disconnected = False
+                opponent_disconnected_since = None
+                game_over = False
+
+                my_turn = (
+                    player_color == clock_turn
+                )
+                
             elif data["type"] == "leaderboard":
                 leaderboard_data = data["data"]
 
@@ -498,7 +560,6 @@ def draw_waiting(mouse_pos):
     draw_button(back_btn, "Cancel", mouse_pos, (50, 53, 65), (65, 68, 82))
     return back_btn
 
-
 def draw_move_history(panel_top):
     panel_rect = pygame.Rect(BOARD_SIZE + 8, panel_top, CHAT_WIDTH - 16, 130)
     pygame.draw.rect(screen, CHAT_BUBBLE, panel_rect, border_radius=10)
@@ -548,6 +609,7 @@ def draw_move_history(panel_top):
         screen.blit(empty, (panel_rect.x + 10, panel_rect.y + 34))
 
 
+
 def draw_chat():
     pygame.draw.rect(screen, CHAT_BG, (BOARD_SIZE, 0, CHAT_WIDTH, HEIGHT))
 
@@ -593,7 +655,11 @@ def draw_chat():
 
     # Turn indicator bar
     if player_color:
-        if my_turn and not game_over and not opponent_left:
+        if opponent_disconnected and not game_over and not opponent_left:
+            bar_color = (74, 58, 30)
+            turn_text = "🔌 Opponent disconnected"
+            turn_fg = (240, 200, 130)
+        elif my_turn and not game_over and not opponent_left:
             bar_color = (46, 160, 67)
             turn_text = f"⚡ Your turn  ({player_color})"
             turn_fg = (220, 255, 220)
@@ -630,20 +696,18 @@ def draw_chat():
         screen.blit(w_txt, (clock_rect.x + 12, clock_rect.y + 6))
         screen.blit(b_txt, (clock_rect.x + 12, clock_rect.y + 34))
 
+    
     font = pygame.font.SysFont(None, 22)
     y = 164
     chat_zone_bottom = HEIGHT - 195
     for msg in chat_messages[-12:]:
         text = font.render(msg, True, TEXT_COLOR)
         bubble = pygame.Rect(BOARD_SIZE + 12, y - 5, text.get_width() + 16, text.get_height() + 10)
-        if bubble.bottom > chat_zone_bottom:
-            break
         pygame.draw.rect(screen, CHAT_BUBBLE, bubble, border_radius=10)
         screen.blit(text, (bubble.x + 8, bubble.y + 5))
         y += bubble.height + 8
 
     draw_move_history(chat_zone_bottom)
-
     border_col = BUTTON_COLOR if chat_active else PANEL_COLOR
     pygame.draw.rect(screen, (45, 48, 58) if chat_active else CHAT_BUBBLE, CHAT_INPUT_RECT, border_radius=10)
     pygame.draw.rect(screen, border_col, CHAT_INPUT_RECT, 2, border_radius=10)
@@ -698,6 +762,52 @@ def draw_game_overlay(mouse_pos):
     btn.center = (BOARD_SIZE // 2, panel.top + 170)
     draw_button(btn, "Return to Menu", mouse_pos, font_size=26)
     return btn
+
+
+def draw_reconnect_banner():
+    """Slim, non-blocking banner shown while the opponent is disconnected.
+
+    The game stays fully playable underneath (clocks keep running, moves
+    are still allowed) -- this just lets the player know the other side
+    dropped and how long they've been gone, in case they come back.
+    """
+    elapsed = time.time() - opponent_disconnected_since if opponent_disconnected_since else 0
+
+    banner_w = min(460, BOARD_SIZE - 80)
+    banner_h = 56
+    banner = pygame.Rect(0, 0, banner_w, banner_h)
+    banner.centerx = BOARD_SIZE // 2
+    banner.top = 18
+
+    surf = pygame.Surface((banner_w, banner_h), pygame.SRCALPHA)
+    pygame.draw.rect(surf, (32, 27, 18, 235), surf.get_rect(), border_radius=14)
+    pygame.draw.rect(surf, (220, 160, 60, 255), surf.get_rect(), 2, border_radius=14)
+    screen.blit(surf, banner.topleft)
+
+    # Rotating arc "spinner" to read as actively waiting/live, not frozen.
+    spinner_center = (banner.left + 32, banner.centery)
+    spinner_radius = 14
+    angle = (time.time() * 220) % 360
+    spinner_rect = pygame.Rect(0, 0, spinner_radius * 2, spinner_radius * 2)
+    spinner_rect.center = spinner_center
+    pygame.draw.circle(screen, (70, 62, 44), spinner_center, spinner_radius, 3)
+    pygame.draw.arc(
+        screen, (240, 180, 70), spinner_rect,
+        math.radians(angle), math.radians(angle + 110), 3
+    )
+
+    font_title = pygame.font.SysFont(None, 24)
+    font_sub = pygame.font.SysFont(None, 20)
+
+    title_surf = font_title.render("Opponent disconnected", True, (240, 200, 130))
+    sub_surf = font_sub.render(
+        f"Waiting for them to reconnect...  {format_clock(elapsed)}",
+        True, SUBTEXT_COLOR
+    )
+
+    text_x = banner.left + 58
+    screen.blit(title_surf, (text_x, banner.top + 7))
+    screen.blit(sub_surf, (text_x, banner.top + 29))
 
 
 def square_to_rowcol(square):
@@ -800,16 +910,8 @@ def handle_click(pos):
 
         if move in board.legal_moves:
             is_capture = board.is_capture(move)
-            move_number = board.fullmove_number
-            moving_color = "white" if board.turn == chess.WHITE else "black"
-            san = board.san(move)
             board.push(move)
             last_move = move
-            move_history.append({
-                "number": move_number,
-                "color": moving_color,
-                "san": san
-            })
             network.send({"type": "move", "move": move.uci(), "fen": board.fen()})
 
             if board.is_checkmate():
@@ -870,7 +972,8 @@ while running:
                     if confirm_btn.collidepoint(event.pos):
                         username = username_input.strip() or "Player"
                         connect()
-                        network.send({"type": "get_rooms"})
+                        print("SENDING RECONNECT", username)
+                        network.send({"type": "reconnect", "username": username})
                         state = "lobby"
 
             elif state == "lobby":
@@ -889,6 +992,7 @@ while running:
                     if create_btn.collidepoint(event.pos):
                         name = room_name_input.strip() or "Room " + str(len(rooms) + 1)
                         rid = str(uuid.uuid4())[:8]
+                        print("CREATE ROOM CLICKED")
                         network.send({
                             "type": "create_room",
                             "room_id": rid,
@@ -947,9 +1051,10 @@ while running:
                     selected_square = None
                     legal_targets.clear()
                     chat_messages.clear()
-                    move_history.clear()
                     chat_input = ""
                     opponent_left = False
+                    opponent_disconnected = False
+                    opponent_disconnected_since = None
                     game_over = False
                     game_over_message = ""
                     time_control = None
@@ -964,9 +1069,10 @@ while running:
                     selected_square = None
                     legal_targets.clear()
                     chat_messages.clear()
-                    move_history.clear()
                     chat_input = ""
                     opponent_left = False
+                    opponent_disconnected = False
+                    opponent_disconnected_since = None
                     game_over = False
                     game_over_message = ""
                     time_control = None
@@ -985,7 +1091,10 @@ while running:
                 elif event.key == pygame.K_RETURN:
                     username = username_input.strip() or "Player"
                     connect()
-                    network.send({"type": "get_rooms"})
+                    network.send({
+                        "type": "reconnect",
+                        "username": username
+                    })
                     state = "lobby"
                 else:
                     if len(username_input) < 20:
@@ -1038,6 +1147,8 @@ while running:
             overlay_btn = draw_game_overlay(mouse_pos)
         else:
             overlay_btn = None
+            if opponent_disconnected:
+                draw_reconnect_banner()
 
     pygame.display.flip()
 
