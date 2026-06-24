@@ -1,6 +1,7 @@
 import pygame
 import chess
 import threading
+import time
 import numpy as np
 import uuid
 from network import Network
@@ -62,6 +63,15 @@ rooms = []
 room_name_input = ""
 room_name_active = False
 room_scroll = 0
+selected_time_control = 5
+
+leaderboard_data = []
+
+# Chess clock state
+time_control = None
+clocks = {"white": 0, "black": 0}
+clock_turn = "white"
+clock_last_sync = time.time()
 
 selected_square = None
 legal_targets = []
@@ -96,10 +106,24 @@ def get_status():
     return None
 
 
+def get_display_clock(color):
+    """Local smooth countdown, resynced whenever the server sends fresh clock data."""
+    if color == clock_turn and not game_over and not opponent_left:
+        elapsed = time.time() - clock_last_sync
+        return max(0, clocks.get(color, 0) - elapsed)
+    return max(0, clocks.get(color, 0))
+
+
+def format_clock(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
 def receive_messages():
     global player_color, my_turn, last_move, state, rooms
     global opponent_left, game_over, game_over_message
-    global spectator_mode
+    global spectator_mode, leaderboard_data
+    global time_control, clocks, clock_turn, clock_last_sync
 
     while True:
         try:
@@ -123,6 +147,11 @@ def receive_messages():
                 game_over_message = ""
                 if player_color == "white":
                     my_turn = True
+                time_control = data.get("time_control")
+                if data.get("clocks"):
+                    clocks = data["clocks"]
+                clock_turn = "white"
+                clock_last_sync = time.time()
 
             elif data["type"] == "move":
                 move = chess.Move.from_uci(data["move"])
@@ -147,6 +176,23 @@ def receive_messages():
                         move_sound.play()
                 my_turn = True
 
+                if data.get("clocks"):
+                    clocks = data["clocks"]
+                    clock_turn = data.get("turn", clock_turn)
+                    clock_last_sync = time.time()
+
+            elif data["type"] == "clock_sync":
+                clocks = data["clocks"]
+                clock_turn = data.get("turn", clock_turn)
+                clock_last_sync = time.time()
+
+            elif data["type"] == "timeout":
+                game_over = True
+                winner_color = data.get("winner_color", "").capitalize()
+                game_over_message = f"{winner_color} wins on time!" if winner_color else "Time's up!"
+                my_turn = False
+                end_sound.play()
+
             elif data["type"] == "chat":
                 chat_messages.append(data["message"])
                 if len(chat_messages) > 15:
@@ -162,6 +208,9 @@ def receive_messages():
                 spectator_mode = True
                 my_turn = False
                 player_color = None
+
+            elif data["type"] == "leaderboard":
+                leaderboard_data = data["data"]
 
             elif data["type"] == "error":
                 chat_messages.append(f"Error: {data['message']}")
@@ -247,7 +296,7 @@ def draw_lobby(mouse_pos):
     screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 100)))
 
     # Create room panel
-    create_panel = pygame.Rect(80, 130, WIDTH - 160, 110)
+    create_panel = pygame.Rect(80, 130, WIDTH - 160, 170)
     pygame.draw.rect(screen, PANEL_COLOR, create_panel, border_radius=14)
 
     font_label = pygame.font.SysFont(None, 26)
@@ -266,8 +315,23 @@ def draw_lobby(mouse_pos):
     create_btn = pygame.Rect(create_panel.x + 420, create_panel.y + 44, 160, 40)
     draw_button(create_btn, "Create Room", mouse_pos, BUTTON_GREEN, BUTTON_GREEN_HOVER, font_size=24)
 
+    # Time control selector
+    tc_lbl = font_label.render("Time Control", True, SUBTEXT_COLOR)
+    screen.blit(tc_lbl, (create_panel.x + 20, create_panel.y + 100))
+
+    time_buttons = []
+    tx = create_panel.x + 20
+    for opt in (1, 5, 10):
+        tbtn = pygame.Rect(tx, create_panel.y + 124, 90, 34)
+        is_selected = (selected_time_control == opt)
+        col = BUTTON_COLOR if is_selected else (50, 53, 65)
+        hov = BUTTON_HOVER if is_selected else (65, 68, 82)
+        draw_button(tbtn, f"{opt} min", mouse_pos, col, hov, font_size=22)
+        time_buttons.append((tbtn, opt))
+        tx += 100
+
     # Room list
-    list_panel = pygame.Rect(80, 260, WIDTH - 160, HEIGHT - 320)
+    list_panel = pygame.Rect(80, 320, WIDTH - 160, HEIGHT - 380)
     pygame.draw.rect(screen, PANEL_COLOR, list_panel, border_radius=14)
 
     font_label2 = pygame.font.SysFont(None, 26)
@@ -295,6 +359,9 @@ def draw_lobby(mouse_pos):
             name_txt = font_room.render(room["name"], True, TEXT_COLOR)
             screen.blit(name_txt, (row_rect.x + 14, row_rect.y + 13))
 
+            tc_txt = font_room.render(f"{room.get('time_control', 5)} min", True, SUBTEXT_COLOR)
+            screen.blit(tc_txt, (row_rect.right - 210, row_rect.y + 13))
+
             players_txt = font_room.render(f"{room['players']}/2", True, SUBTEXT_COLOR)
             screen.blit(players_txt, (row_rect.right - 120, row_rect.y + 13))
 
@@ -320,10 +387,70 @@ def draw_lobby(mouse_pos):
     refresh_btn = pygame.Rect(list_panel.x + 20, list_panel.bottom + 10, 130, 38)
     draw_button(refresh_btn, "Refresh", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=24)
 
+    leaderboard_btn = pygame.Rect(list_panel.x + 160, list_panel.bottom + 10, 170, 38)
+    draw_button(leaderboard_btn, "🏆 Leaderboard", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=22)
+
     back_btn = pygame.Rect(list_panel.right - 150, list_panel.bottom + 10, 130, 38)
     draw_button(back_btn, "Back", mouse_pos, (50, 53, 65), (65, 68, 82), font_size=24)
 
-    return input_rect, create_btn, join_buttons, refresh_btn, back_btn
+    return input_rect, create_btn, join_buttons, refresh_btn, leaderboard_btn, back_btn, time_buttons
+
+
+def draw_leaderboard(mouse_pos):
+    draw_gradient()
+
+    font_title = pygame.font.SysFont(None, 60)
+    title = font_title.render("🏆 Leaderboard", True, TEXT_COLOR)
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 60)))
+
+    font_sub = pygame.font.SysFont(None, 24)
+    sub = font_sub.render("Top players by wins", True, SUBTEXT_COLOR)
+    screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 100)))
+
+    panel = pygame.Rect(80, 140, WIDTH - 160, HEIGHT - 220)
+    pygame.draw.rect(screen, PANEL_COLOR, panel, border_radius=14)
+
+    font_header = pygame.font.SysFont(None, 24)
+    screen.blit(font_header.render("Rank", True, SUBTEXT_COLOR), (panel.x + 20, panel.y + 16))
+    screen.blit(font_header.render("Player", True, SUBTEXT_COLOR), (panel.x + 100, panel.y + 16))
+    screen.blit(font_header.render("Wins", True, SUBTEXT_COLOR), (panel.right - 100, panel.y + 16))
+
+    pygame.draw.line(screen, (45, 48, 60),
+                      (panel.x + 16, panel.y + 44),
+                      (panel.right - 16, panel.y + 44), 1)
+
+    font_row = pygame.font.SysFont(None, 28)
+
+    if not leaderboard_data:
+        empty = font_row.render("No games finished yet. Be the first to win!", True, SUBTEXT_COLOR)
+        screen.blit(empty, empty.get_rect(center=(WIDTH // 2, panel.y + 110)))
+    else:
+        for i, entry in enumerate(leaderboard_data[:12]):
+            y = panel.y + 56 + i * 42
+            row_rect = pygame.Rect(panel.x + 12, y, panel.width - 24, 36)
+
+            if i == 0:
+                rank_color = (255, 215, 0)
+            elif i == 1:
+                rank_color = (192, 192, 192)
+            elif i == 2:
+                rank_color = (180, 120, 60)
+            else:
+                rank_color = TEXT_COLOR
+
+            rank_txt = font_row.render(f"#{i + 1}", True, rank_color)
+            screen.blit(rank_txt, (row_rect.x + 8, row_rect.y + 4))
+
+            name_txt = font_row.render(entry["username"], True, TEXT_COLOR)
+            screen.blit(name_txt, (row_rect.x + 90, row_rect.y + 4))
+
+            wins_txt = font_row.render(str(entry["wins"]), True, TEXT_COLOR)
+            screen.blit(wins_txt, (row_rect.right - 90, row_rect.y + 4))
+
+    back_btn = pygame.Rect(0, 0, 160, 44)
+    back_btn.center = (WIDTH // 2, panel.bottom + 36)
+    draw_button(back_btn, "Back", mouse_pos, (50, 53, 65), (65, 68, 82))
+    return back_btn
 
 
 def draw_waiting(mouse_pos):
@@ -406,10 +533,30 @@ def draw_chat():
         screen.blit(turn_surf, turn_surf.get_rect(center=bar_rect.center))
 
     pygame.draw.line(screen, PANEL_COLOR,
-                     (BOARD_SIZE + 16, 82), (BOARD_SIZE + CHAT_WIDTH - 16, 82), 1)
+                     (BOARD_SIZE + 16, 152), (BOARD_SIZE + CHAT_WIDTH - 16, 152), 1)
+
+    # Chess clocks
+    if time_control is not None:
+        clock_rect = pygame.Rect(BOARD_SIZE + 8, 80, CHAT_WIDTH - 16, 64)
+        pygame.draw.rect(screen, CHAT_BUBBLE, clock_rect, border_radius=8)
+
+        font_clock = pygame.font.SysFont(None, 26)
+        running_now = not game_over and not opponent_left
+
+        white_active = clock_turn == "white" and running_now
+        black_active = clock_turn == "black" and running_now
+
+        white_color = (100, 220, 100) if white_active else SUBTEXT_COLOR
+        black_color = (100, 220, 100) if black_active else SUBTEXT_COLOR
+
+        w_txt = font_clock.render(f"⚪ White   {format_clock(get_display_clock('white'))}", True, white_color)
+        b_txt = font_clock.render(f"⚫ Black   {format_clock(get_display_clock('black'))}", True, black_color)
+
+        screen.blit(w_txt, (clock_rect.x + 12, clock_rect.y + 6))
+        screen.blit(b_txt, (clock_rect.x + 12, clock_rect.y + 34))
 
     font = pygame.font.SysFont(None, 22)
-    y = 94
+    y = 164
     for msg in chat_messages[-12:]:
         text = font.render(msg, True, TEXT_COLOR)
         bubble = pygame.Rect(BOARD_SIZE + 12, y - 5, text.get_width() + 16, text.get_height() + 10)
@@ -610,6 +757,7 @@ play_btn = None
 username_elements = None
 lobby_elements = None
 waiting_back_btn = None
+leaderboard_back_btn = None
 game_menu_btn = None
 overlay_btn = None
 
@@ -639,17 +787,27 @@ while running:
 
             elif state == "lobby":
                 if lobby_elements:
-                    input_rect, create_btn, join_buttons, refresh_btn, back_btn = lobby_elements
+                    input_rect, create_btn, join_buttons, refresh_btn, leaderboard_btn, back_btn, time_buttons = lobby_elements
 
                     if input_rect.collidepoint(event.pos):
                         room_name_active = True
                     else:
                         room_name_active = False
 
+                    for tbtn, opt in time_buttons:
+                        if tbtn.collidepoint(event.pos):
+                            selected_time_control = opt
+
                     if create_btn.collidepoint(event.pos):
                         name = room_name_input.strip() or "Room " + str(len(rooms) + 1)
                         rid = str(uuid.uuid4())[:8]
-                        network.send({"type": "create_room", "room_id": rid, "name": name})
+                        network.send({
+                            "type": "create_room",
+                            "room_id": rid,
+                            "name": name,
+                            "username": username,
+                            "time_control": selected_time_control
+                        })
 
                     for jbtn, rid, ongoing in join_buttons:
 
@@ -662,16 +820,26 @@ while running:
                             else:
                                 network.send({
                                     "type": "join_room",
-                                    "room_id": rid
+                                    "room_id": rid,
+                                    "username": username
                                 })
 
                     if refresh_btn.collidepoint(event.pos):
                         network.send({"type": "get_rooms"})
 
+                    if leaderboard_btn.collidepoint(event.pos):
+                        network.send({"type": "get_leaderboard"})
+                        state = "leaderboard"
+
                     if back_btn.collidepoint(event.pos):
                         state = "menu"
                         network = None
                         rooms.clear()
+
+            elif state == "leaderboard":
+                if leaderboard_back_btn and leaderboard_back_btn.collidepoint(event.pos):
+                    state = "lobby"
+                    network.send({"type": "get_rooms"})
 
             elif state == "waiting":
                 if waiting_back_btn and waiting_back_btn.collidepoint(event.pos):
@@ -695,6 +863,7 @@ while running:
                     opponent_left = False
                     game_over = False
                     game_over_message = ""
+                    time_control = None
                 elif game_menu_btn and game_menu_btn.collidepoint(event.pos):
                     state = "menu"
                     network = None
@@ -710,6 +879,7 @@ while running:
                     opponent_left = False
                     game_over = False
                     game_over_message = ""
+                    time_control = None
                 elif CHAT_INPUT_RECT.collidepoint(event.pos):
                     chat_active = True
                 else:
@@ -766,6 +936,9 @@ while running:
 
     elif state == "waiting":
         waiting_back_btn = draw_waiting(mouse_pos)
+
+    elif state == "leaderboard":
+        leaderboard_back_btn = draw_leaderboard(mouse_pos)
 
     elif state == "game":
         draw_board()
