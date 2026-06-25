@@ -1,23 +1,27 @@
 # ♟️ NetChess
-
 A Python-based multiplayer chess application built with Pygame. Two players connect over a network, create or join game rooms, and play chess in real-time with live chat.
 
 ---
 
 ## Features
-
 - 🏠 Game room lobby — create and join named rooms
 - ♟️ Real-time move synchronization over TCP
 - 💬 In-game chat panel
-- 🔊 Sound effects for moves, captures, check, and checkmate
+- 🔊 Programmatically generated sound effects for moves, captures, check, and checkmate
 - 🟡 Last-move highlight and legal move indicators
 - ⚠️ Check / Checkmate / Stalemate detection
 - 👤 Custom username before entering lobby
+- ⏱️ Chess clock with selectable time controls (1, 5, or 10 minutes)
+- 👁️ Spectator mode — watch ongoing matches live
+- 🏆 Leaderboard — persistent win tracking across sessions
+- 🔌 Opponent disconnect detection with reconnection support
+- 🔄 Game resume after disconnect — board and clocks restored
+- 📜 Move history panel with SAN notation
+- 🎨 Flipped board for black player perspective
 
 ---
 
 ## Requirements
-
 - Python 3.10+
 - [pygame](https://pypi.org/project/pygame/) — `pip install pygame`
 - [python-chess](https://pypi.org/project/chess/) — `pip install python-chess`
@@ -56,7 +60,6 @@ Both clients connect to `127.0.0.1` (localhost) by default.
 ### Different Machines (2 players, 2 computers)
 
 **On the host machine:**
-
 1. Run the server:
    ```
    python server.py
@@ -86,8 +89,11 @@ python client.py
 1. Launch `client.py` on both machines
 2. Enter your username
 3. One player clicks **Create Room**, the other clicks **Join**
-4. White moves first — click a piece, then click a destination
-5. Use the chat panel on the right to talk during the match
+4. Choose a time control (1, 5, or 10 minutes) when creating a room
+5. White moves first — click a piece, then click a destination
+6. Use the chat panel on the right to talk during the match
+7. If your opponent disconnects, wait — they can reconnect and resume
+8. Click **Watch** on any ongoing room in the lobby to spectate
 
 ---
 
@@ -98,6 +104,7 @@ FP-Progjar-NetChess/
 ├── server.py        # TCP server — manages rooms and relays messages
 ├── client.py        # Pygame GUI client — game board, lobby, chat
 ├── network.py       # Socket wrapper — send/receive JSON messages
+├── leaderboard.json # Persistent win records (auto-generated)
 ├── assets/
 │   └── pieces/      # Chess piece images (.png)
 └── README.md
@@ -109,11 +116,12 @@ FP-Progjar-NetChess/
 
 | Name | NRP |
 |------|-----|
-| Palpal Yalmialam | 5025241002 | 
-| Kenzie Maheswara | 5025241001 | 
-| Bismantaka Revano Dirgantara | 5025241075 | 
-| Ramasyamsi Ahmad Shabri | 5025241008 | 
-| Alif Muflih Jauhary | 5025241003 | 
+| Palpal Yalmialam | 5025241002 |
+| Kenzie Maheswara | 5025241001 |
+| Bismantaka Revano Dirgantara | 5025241075 |
+| Ramasyamsi Ahmad Shabri | 5025241008 |
+| Alif Muflih Jauhary | 5025241003 |
+
 ---
 
 *Final Project — Pemrograman Jaringan (Progjar) — Institut Teknologi Sepuluh Nopember*
