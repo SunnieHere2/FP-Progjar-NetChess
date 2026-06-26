@@ -112,6 +112,28 @@ FP-Progjar-NetChess/
 
 ---
 
+## How It Works
+
+NetChess uses a central client–server architecture:
+
+```
+Player 1  ⇄ (TCP) ⇄  Chess Server  ⇄ (TCP) ⇄  Player 2
+```
+
+The server holds the authoritative game state (board, clocks, turn, and move history) and relays moves and chat between both players and any spectators. Course concepts applied:
+- **TCP sockets** — all client–server communication
+- **Threading** — one handler thread per client, a background clock watchdog, and a separate receive thread on the client so the GUI never blocks
+- **JSON serialization** — moves, board state, and chat are sent as JSON messages
+
+---
+
+## Notes
+
+- The app runs over **localhost and LAN / Wi-Fi**. Internet play requires hosting the server on a public IP or forwarding port `5555`.
+- `leaderboard.json` is created automatically after the first recorded win.
+
+---
+
 ## Team
 
 | Name | NRP |
