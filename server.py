@@ -1,3 +1,8 @@
+# server.py — the central hub that all clients connect to.
+# it manages game rooms, relays moves and chat between players,
+# tracks clocks, handles disconnects/reconnects, and saves the leaderboard.
+# every client gets its own thread via handle_client. a separate clock_monitor thread watches for timeouts.
+
 import socket
 import threading
 import json
@@ -5,25 +10,30 @@ import os
 import time
 import chess
 
-HOST = "0.0.0.0"
+HOST = "0.0.0.0"  # listen on all network interfaces so anyone on the network can connect
 PORT = 5555
-START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"  # standard chess starting position
 LEADERBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leaderboard.json")
 
+# create the tcp server socket and start listening for connections
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # allows restarting the server quickly without "address already in use" error
 server.bind((HOST, PORT))
 server.listen()
 
+# rooms dict stores all active game rooms. rooms_lock prevents two threads from editing it at the same time.
 rooms = {}
 rooms_lock = threading.Lock()
 
+# connected_clients tracks every connected socket. used to broadcast the leaderboard to everyone.
 connected_clients = []
 clients_lock = threading.Lock()
 
-leaderboard_lock = threading.Lock()
+leaderboard_lock = threading.Lock()  # prevents concurrent read/write conflicts on the leaderboard dict
 
 
+# reads the leaderboard from leaderboard.json on disk and returns it as a dict {username: wins}.
+# if the file doesn't exist or is corrupted, returns an empty dict instead of crashing.
 def load_leaderboard():
     if os.path.exists(LEADERBOARD_FILE):
         try:
@@ -34,6 +44,7 @@ def load_leaderboard():
     return {}
 
 
+# writes the current leaderboard dict to leaderboard.json so wins persist across server restarts.
 def save_leaderboard(data):
     try:
         with open(LEADERBOARD_FILE, "w") as f:
@@ -45,6 +56,8 @@ def save_leaderboard(data):
 leaderboard = load_leaderboard()
 
 
+# adds 1 win to the given player's record and immediately saves to disk.
+# called whenever a game ends by checkmate or timeout.
 def record_win(username):
     if not username:
         return
@@ -53,6 +66,8 @@ def record_win(username):
         save_leaderboard(leaderboard)
 
 
+# returns the leaderboard as a sorted list of {username, wins} dicts, highest wins first.
+# capped at top 50 players. this is what gets sent to clients when they request the leaderboard.
 def get_leaderboard_list():
     with leaderboard_lock:
         ranked = sorted(leaderboard.items(), key=lambda kv: kv[1], reverse=True)
@@ -62,10 +77,15 @@ def get_leaderboard_list():
 print(f"Server running on {HOST}:{PORT}")
 
 
+# sends a python dict to a single client as a json string over tcp.
+# all server-to-client communication goes through this function.
 def send_json(client, data):
     client.send(json.dumps(data).encode())
 
 
+# sends the current list of all game rooms to every connected client so their lobby stays up to date.
+# called whenever a room is created, joined, or a player disconnects.
+# the "exclude" param ensures the triggering client also gets the update (sent last separately).
 def broadcast_room_list(exclude=None):
     with rooms_lock:
         room_list = [
@@ -117,6 +137,8 @@ def broadcast_room_list(exclude=None):
             pass
 
 
+# sends the updated leaderboard to every currently connected client.
+# called after a game ends (checkmate or timeout) so all open leaderboard screens refresh automatically.
 def broadcast_leaderboard():
     msg = json.dumps({
         "type": "leaderboard",
@@ -133,10 +155,14 @@ def broadcast_leaderboard():
             pass
 
 
+# runs in its own thread for each connected client.
+# continuously reads incoming data into a buffer, splits it on newlines to get complete json messages,
+# then dispatches each message to the right handler block below based on its "type" field.
+# when the client disconnects (recv returns empty or throws), the cleanup block at the bottom runs.
 def handle_client(client):
     room_id = None
 
-    buffer = ""
+    buffer = ""  # accumulates raw bytes until a complete newline-terminated json message is ready
 
     while True:
         try:
@@ -158,6 +184,8 @@ def handle_client(client):
 
                 # process packet
 
+                # "get_rooms": client is requesting a fresh room list (e.g. on lobby load or refresh button).
+                # builds the list from current rooms and sends it only to this client.
                 if data["type"] == "get_rooms":
                     with rooms_lock:
                         room_list = [
@@ -177,9 +205,13 @@ def handle_client(client):
                         ]
                     send_json(client, {"type": "room_list", "rooms": room_list})
 
+                # "get_leaderboard": client wants to see the leaderboard. sends the sorted win list back.
                 elif data["type"] == "get_leaderboard":
                     send_json(client, {"type": "leaderboard", "data": get_leaderboard_list()})
 
+                # "create_room": a player wants to create a new room.
+                # stores the room in the rooms dict with the creator as white, clocks not started yet.
+                # sends "color: white" and "waiting" back to the creator, then broadcasts the updated room list.
                 elif data["type"] == "create_room":
                     print("CREATE ROOM RECEIVED")
                     tc = data.get("time_control", 5)
@@ -211,6 +243,9 @@ def handle_client(client):
                     send_json(client, {"type": "waiting"})
                     broadcast_room_list()
 
+                # "join_room": a second player joins an existing room.
+                # assigns them as black, initialises the clocks, and sends "start" to both players.
+                # both players receive their color, the time control, and initial clock values.
                 elif data["type"] == "join_room":
                     rid = data["room_id"]
                     with rooms_lock:
@@ -254,6 +289,9 @@ def handle_client(client):
                         send_json(client, start_payload)
                         broadcast_room_list()
 
+                # "spectate": a third party wants to watch an ongoing game.
+                # adds them to the room's spectators list and sends them the current board position (fen)
+                # plus the full move history so they can see everything that has happened so far.
                 elif data["type"] == "spectate":
                         print("SPECTATE REQUEST", data["room_id"])
                         rid = data["room_id"]
@@ -284,6 +322,11 @@ def handle_client(client):
                                     "message": "Match not available"
                                 })
 
+                # "reconnect": sent by a client on startup with their username.
+                # the server checks every room to see if this username belongs to a disconnected player.
+                # if found, it reassigns their socket, calculates how much clock time passed while they were gone,
+                # sends a "resume" message with the current board/clocks so they can pick up exactly where they left off,
+                # and notifies the opponent that they came back.
                 elif data["type"] == "reconnect":
 
                     username = data["username"]
@@ -381,6 +424,12 @@ def handle_client(client):
                                 print("RECONNECT FINISHED")
                                 break
 
+                # "move": a player made a move. the server:
+                # 1. saves the new board position (fen) to the room so reconnecting players and spectators get the latest state.
+                # 2. deducts the elapsed time from the player who just moved and switches whose clock is running.
+                # 3. forwards the move to the other player and all spectators.
+                # 4. sends a clock_sync back to the player who moved so their display stays accurate.
+                # 5. checks the resulting fen for checkmate — if found, records the win and broadcasts the leaderboard.
                 elif data["type"] == "move":
                     if room_id:
 
@@ -463,6 +512,8 @@ def handle_client(client):
                                 except ValueError:
                                     pass
 
+                # "chat": a player sent a chat message.
+                # forwards it to everyone else in the room (both players + spectators), but not back to the sender.
                 elif data["type"] == "chat":
 
                     if room_id:
@@ -490,6 +541,12 @@ def handle_client(client):
             print("Client error:", e)
             break
 
+    # --- disconnect cleanup ---
+    # runs when the client's connection drops (recv returned empty or threw an exception).
+    # removes them from their room. if both players are gone and no spectators remain, deletes the room entirely.
+    # if only one player left, notifies the remaining player with "opponent_disconnected".
+    # if it was a spectator, just removes them from the spectators list.
+    # finally, removes the socket from connected_clients and closes it.
     if room_id:
         with rooms_lock:
             room = rooms.get(room_id)
@@ -551,6 +608,11 @@ def handle_client(client):
     client.close()
 
 
+# background watchdog thread that checks every second if any player's clock has run out.
+# this is necessary because the clock only ticks server-side when a move arrives —
+# if a player just sits there and lets time run out without moving, this thread catches it.
+# when a timeout is detected, it marks the game as over, records the win for the other player,
+# broadcasts the updated leaderboard, and sends a "timeout" message to both players and spectators.
 def clock_monitor():
     """Background watchdog: ends a match on timeout even if no move arrives."""
     while True:
@@ -629,8 +691,11 @@ def clock_monitor():
                     pass
 
 
+# start the clock watchdog in the background so timeouts work even with no move activity
 threading.Thread(target=clock_monitor, daemon=True).start()
 
+# main accept loop — waits for new client connections, adds them to connected_clients,
+# and spawns a dedicated handle_client thread for each one so they all run independently.
 while True:
     client, addr = server.accept()
     print("Connected:", addr)
