@@ -1,3 +1,10 @@
+# client.py — the main pygame application. draws every screen, handles all user input, and communicates with the server.
+# palpal : report.pdf, chess clock display (helping kenzie)
+# bisma  : all ui screens, game rooms, turn tracking, username, last-move highlight, sounds, auto promotion, disconnect detection, match status
+# kenzie : leaderboard screen, chess clock display, time control selector in lobby
+# alif   : move history logic, move history panel
+# rama   : reconnect/rejoin flow, network message handling, basic chess logic, chat feature, spectator mode
+
 import pygame
 import chess
 import threading
@@ -81,6 +88,8 @@ selected_square = None
 legal_targets = []
 
 
+# bisma: generates all sound effects (move, capture, check, end) mathematically using numpy.
+# no audio files needed — pure sine or square waves at different frequencies and durations.
 def make_sound(freq, duration, volume=0.3, wave="sine"):
     sample_rate = 44100
     n = int(sample_rate * duration)
@@ -110,6 +119,9 @@ def get_status():
     return None
 
 
+# kenzie: returns the smoothly counting-down time for a given color.
+# instead of waiting for server updates, it subtracts local elapsed time from the last known server value,
+# so the clock ticks smoothly on screen every frame without needing a network message every second.
 def get_display_clock(color):
     """Local smooth countdown, resynced whenever the server sends fresh clock data."""
     if color == clock_turn and not game_over and not opponent_left:
@@ -118,11 +130,16 @@ def get_display_clock(color):
     return max(0, clocks.get(color, 0))
 
 
+# kenzie: converts raw seconds into a mm:ss string for display on the clock panel.
 def format_clock(seconds):
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+# rama: runs in a background thread and listens for every message the server sends.
+# when a message arrives it updates the relevant global state (board, clocks, chat, game status, etc.)
+# so the main loop always has fresh data to draw. handles: move, chat, start, clock_sync, timeout,
+# opponent_disconnected, opponent_reconnected, spectator_start, resume, leaderboard, error.
 def receive_messages():
     global player_color, my_turn, last_move, state, rooms
     global opponent_left, game_over, game_over_message
@@ -308,6 +325,7 @@ def receive_messages():
             break
 
 
+# bisma: draws the dark top-to-bottom gradient background used on all non-game screens (menu, lobby, etc.)
 def draw_gradient():
     for y in range(HEIGHT):
         t = y / HEIGHT
@@ -317,6 +335,8 @@ def draw_gradient():
         pygame.draw.line(screen, (r, g, b), (0, y), (WIDTH, y))
 
 
+# bisma: reusable helper that draws a rounded button with a hover color change.
+# used by every screen — pass the rect, label, and current mouse position.
 def draw_button(rect, label, mouse_pos, color=None, hover_color=None, font_size=36):
     c = color or BUTTON_COLOR
     hc = hover_color or BUTTON_HOVER
@@ -327,6 +347,8 @@ def draw_button(rect, label, mouse_pos, color=None, hover_color=None, font_size=
     screen.blit(txt, txt.get_rect(center=rect.center))
 
 
+# bisma: draws the main menu screen with the NetChess title and a "Play Online" button.
+# clicking the button transitions state to "username".
 def draw_menu(mouse_pos):
     draw_gradient()
     panel = pygame.Rect(0, 0, 480, 340)
@@ -348,6 +370,8 @@ def draw_menu(mouse_pos):
 
 
 
+# bisma: draws the username input screen. the player types their display name here before entering the lobby.
+# pressing enter or clicking continue sends a reconnect message to the server with the chosen name.
 def draw_username(mouse_pos):
     draw_gradient()
     panel = pygame.Rect(0, 0, 480, 300)
@@ -372,6 +396,9 @@ def draw_username(mouse_pos):
     draw_button(confirm_btn, "Continue", mouse_pos)
     return input_rect, confirm_btn
 
+# bisma: draws the game lobby screen. shows a room name input, a create button, and a list of active rooms.
+# each room row shows its name, player count, and a join or watch button.
+# kenzie: the time control buttons (1/5/10 min) in the create room panel are kenzie's contribution.
 def draw_lobby(mouse_pos):
     draw_gradient()
 
@@ -484,6 +511,8 @@ def draw_lobby(mouse_pos):
     return input_rect, create_btn, join_buttons, refresh_btn, leaderboard_btn, back_btn, time_buttons
 
 
+# kenzie: draws the leaderboard screen. displays up to 12 players ranked by total wins.
+# gold/silver/bronze colors for top 3. data is fetched from the server (stored in leaderboard.json).
 def draw_leaderboard(mouse_pos):
     draw_gradient()
 
@@ -541,6 +570,8 @@ def draw_leaderboard(mouse_pos):
     return back_btn
 
 
+# bisma: draws the waiting screen shown to the room creator after creating a room.
+# stays here until the server sends a "start" message when an opponent joins.
 def draw_waiting(mouse_pos):
     draw_gradient()
     panel = pygame.Rect(0, 0, 480, 260)
@@ -560,6 +591,9 @@ def draw_waiting(mouse_pos):
     draw_button(back_btn, "Cancel", mouse_pos, (50, 53, 65), (65, 68, 82))
     return back_btn
 
+# alif: draws the move history panel in the chat sidebar.
+# groups moves into white/black pairs per turn and displays them in standard algebraic notation (san).
+# only shows the most recent rows that fit in the panel height.
 def draw_move_history(panel_top):
     panel_rect = pygame.Rect(BOARD_SIZE + 8, panel_top, CHAT_WIDTH - 16, 130)
     pygame.draw.rect(screen, CHAT_BUBBLE, panel_rect, border_radius=10)
@@ -610,6 +644,10 @@ def draw_move_history(panel_top):
 
 
 
+# bisma: draws the entire right sidebar. includes the chat message bubbles, chat input box,
+# turn indicator bar (your turn / opponent's turn / disconnected), and a menu button.
+# kenzie: the chess clock widget (white/black timers) inside this sidebar is kenzie's contribution.
+# rama: the spectator badge shown when watching a game is part of rama's spectator mode feature.
 def draw_chat():
     pygame.draw.rect(screen, CHAT_BG, (BOARD_SIZE, 0, CHAT_WIDTH, HEIGHT))
 
@@ -721,8 +759,10 @@ def draw_chat():
     return menu_btn
 
 
+# bisma: draws a semi-transparent overlay on top of the board when the game ends or the opponent leaves.
+# shows the result (checkmate/stalemate/opponent left) in green (win), red (loss), or yellow (draw/other).
+# has a "return to menu" button that resets all game state.
 def draw_game_overlay(mouse_pos):
-    """Semi-transparent overlay shown when game ends or opponent leaves."""
     overlay = pygame.Surface((BOARD_SIZE, BOARD_SIZE), pygame.SRCALPHA)
     overlay.fill((0, 0, 0, 170))
     screen.blit(overlay, (0, 0))
@@ -764,6 +804,9 @@ def draw_game_overlay(mouse_pos):
     return btn
 
 
+# bisma: draws a slim warning banner at the top of the board when the opponent disconnects mid-game.
+# the game stays fully playable — clocks keep running. the banner shows a spinning arc and elapsed time
+# so the player knows their opponent dropped and may reconnect.
 def draw_reconnect_banner():
     """Slim, non-blocking banner shown while the opponent is disconnected.
 
@@ -810,6 +853,8 @@ def draw_reconnect_banner():
     screen.blit(sub_surf, (text_x, banner.top + 29))
 
 
+# rama: converts a chess square index (0–63) into a screen (row, col) position.
+# flips the board horizontally when the local player is black so their pieces always appear at the bottom.
 def square_to_rowcol(square):
     rank = chess.square_rank(square)
     file = chess.square_file(square)
@@ -818,6 +863,8 @@ def square_to_rowcol(square):
     return 7 - rank, file
 
 
+# rama: draws the 8x8 chessboard. light/dark squares, last-move highlight (yellow tint on from/to squares),
+# selected piece highlight, and legal move dots (small dot for empty squares, ring for capturable pieces).
 def draw_board():
     for row in range(8):
         for col in range(8):
@@ -851,6 +898,8 @@ def draw_board():
     pygame.draw.rect(screen, PANEL_COLOR, (0, 0, BOARD_SIZE, BOARD_SIZE), 4)
 
 
+# rama: draws every piece currently on the board using the pre-loaded png images.
+# uses square_to_rowcol so pieces appear in the correct position for both white and black perspectives.
 def draw_pieces():
     for square in chess.SQUARES:
         piece = board.piece_at(square)
@@ -872,6 +921,9 @@ for piece, filename in piece_map.items():
     piece_images[piece] = img
 
 
+# rama: handles a mouse click on the board. first click selects a piece and shows its legal moves.
+# second click on a legal target executes the move, sends it to the server, plays a sound,
+# and checks for checkmate/stalemate. automatically promotes pawns to queen on the last rank.
 def handle_click(pos):
     global selected_square, my_turn, legal_targets, last_move, game_over, game_over_message
     global spectator_mode
@@ -936,12 +988,16 @@ def handle_click(pos):
         legal_targets = []
 
 
+# rama: creates the network connection to the server and starts receive_messages in a background thread.
+# called once when the player confirms their username and enters the lobby.
 def connect():
     global network
     network = Network()
     threading.Thread(target=receive_messages, daemon=True).start()
 
 
+# rama: main game loop. processes all pygame events (clicks, keypresses, scroll) and calls the correct
+# draw function based on the current state ("menu", "username", "lobby", "waiting", "leaderboard", "game").
 running = True
 play_btn = None
 username_elements = None
