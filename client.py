@@ -853,7 +853,7 @@ def draw_reconnect_banner():
     screen.blit(sub_surf, (text_x, banner.top + 29))
 
 
-# bisma: converts a chess square index (0–63) into a screen (row, col) position.
+# rama: converts a chess square index (0–63) into a screen (row, col) position.
 # flips the board horizontally when the local player is black so their pieces always appear at the bottom.
 def square_to_rowcol(square):
     rank = chess.square_rank(square)
@@ -863,7 +863,7 @@ def square_to_rowcol(square):
     return 7 - rank, file
 
 
-# bisma: draws the 8x8 chessboard. light/dark squares, last-move highlight (yellow tint on from/to squares),
+# rama: draws the 8x8 chessboard. light/dark squares, last-move highlight (yellow tint on from/to squares),
 # selected piece highlight, and legal move dots (small dot for empty squares, ring for capturable pieces).
 def draw_board():
     for row in range(8):
@@ -898,7 +898,7 @@ def draw_board():
     pygame.draw.rect(screen, PANEL_COLOR, (0, 0, BOARD_SIZE, BOARD_SIZE), 4)
 
 
-# bisma: draws every piece currently on the board using the pre-loaded png images.
+# rama: draws every piece currently on the board using the pre-loaded png images.
 # uses square_to_rowcol so pieces appear in the correct position for both white and black perspectives.
 def draw_pieces():
     for square in chess.SQUARES:
@@ -921,7 +921,7 @@ for piece, filename in piece_map.items():
     piece_images[piece] = img
 
 
-# bisma: handles a mouse click on the board. first click selects a piece and shows its legal moves.
+# rama: handles a mouse click on the board. first click selects a piece and shows its legal moves.
 # second click on a legal target executes the move, sends it to the server, plays a sound,
 # and checks for checkmate/stalemate. automatically promotes pawns to queen on the last rank.
 def handle_click(pos):
@@ -996,7 +996,7 @@ def connect():
     threading.Thread(target=receive_messages, daemon=True).start()
 
 
-# bisma: main game loop. processes all pygame events (clicks, keypresses, scroll) and calls the correct
+# rama: main game loop. processes all pygame events (clicks, keypresses, scroll) and calls the correct
 # draw function based on the current state ("menu", "username", "lobby", "waiting", "leaderboard", "game").
 running = True
 play_btn = None
